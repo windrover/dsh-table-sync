@@ -1,7 +1,7 @@
-# DSH 插件表每周自动同步
+# DSH 插件表每日自动同步
 
 把 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 的插件清单与
-GitHub 热度（⭐ Star / 🍴 Fork）**每周自动同步**到三处：
+GitHub 热度（⭐ Star / 🍴 Fork）**每天自动同步**到三处：
 
 1. **仓库内表格** —— `dsh-plugins-table.md` / `dsh-plugins-table.csv`（GitHub Actions 自动提交）
 2. **GitHub Pages 网页** —— `docs/index.html`（带搜索 / 分类筛选 / 排序，自动部署）
@@ -24,7 +24,7 @@ GitHub API（每仓库 star / fork）
 ```
 dsh-table-sync/
 ├── sync.py                     # 一键同步脚本（核心）
-├── .github/workflows/sync.yml  # 每周自动执行的 Actions
+├── .github/workflows/sync.yml  # 每天自动执行的 Actions
 ├── data/heat.json              # 热度缓存（脚本自动维护并提交）
 ├── docs/index.html             # Pages 网页（脚本生成）
 ├── dsh-plugins-table.md        # 表格产物（脚本生成）
@@ -76,7 +76,7 @@ python3 sync.py --readme-file /path/README.zh.md   # 用本地清单文件
    成功后仓库里会出现更新后的表格，Pages 网址为 `https://<用户名>.github.io/dsh-table-sync/`，
    Notion 数据库同步为最新。
 
-之后**每周一 08:00 UTC（北京时间 16:00）自动执行**，也可随时手动触发。
+之后**每天 00:00 UTC（北京时间 08:00）自动执行**，也可随时手动触发。
 
 ## 二级分类自动打标
 
