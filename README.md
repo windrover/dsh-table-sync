@@ -107,3 +107,92 @@ schedule:
 ```
 
 cron 语法是 **UTC 时间**（北京时间 = UTC + 8）。
+
+## 日常使用说明
+
+### 每天自动做什么（你不需要做任何事）
+
+每天 **00:00 UTC（北京时间 08:00）** GitHub Actions 在云端自动执行一遍：
+
+1. 拉取 awesome-dsh-plugin 最新插件清单 + GitHub 各仓库最新 star/fork
+2. 重新生成 `dsh-plugins-table.md` / `.csv`、`docs/index.html`
+3. 同步 Notion 数据库「DSH 插件总览」（新增/更新/归档 + 二级分类自动打标）
+4. 自动提交表格、自动部署 GitHub Pages
+
+你的电脑**关机也没关系**，全程在 GitHub 服务器上完成。同步频率、时间点都不需要你手动维护。
+
+### 查看运行状态 / 日志
+
+- 仓库 **Actions** 页 → 点 **dsh-table-sync** → 看最近一次运行（绿勾=成功，红叉=失败）
+- 点进运行 → 展开 `Run sync` 步骤 → 看尾部日志（应有 `DONE`）
+- 关注 `[notion] 差异: 更新 N / 新增 N / 归档 N` —— N 越大说明当天变化越多
+
+### 改二级分类打标规则
+
+规则在 `sync.py` 的 `SUBCAT_RULES`（每个一级分类下的 `(二级分类名, [关键词])`，按顺序先匹配先得）：
+
+```python
+"🎨 UI 增强": [
+    ("文件浏览器/工作区", ["文件树", "工作区", "explorer", ...]),
+    ("终端", ["terminal", "tui", "终端", ...]),
+    ...,
+]
+```
+
+改完按下面"发布改动"流程同步即可，下次自动运行生效。
+
+### 改执行频率
+
+编辑 `.github/workflows/sync.yml` 的 `schedule.cron`（UTC 时间，北京时间 = UTC+8）：
+
+```yaml
+schedule:
+  - cron: '0 0 * * *'    # 每天 00:00 UTC（默认）
+  # - cron: '30 8 * * 1' # 改为每周一 08:30 UTC
+```
+
+### 手动触发一次
+
+仓库 **Actions** → dsh-table-sync → **Run workflow** → Branch 选 `main` → 运行。（比如你想立刻刷新，或测试某次改动。）
+
+### 本地也能手动跑
+
+```sh
+cd dsh-table-sync
+export GITHUB_TOKEN=ghp_xxx        # 可选但推荐（否则走慢速兜底）
+export NOTION_API_KEY=ntn_xxx      # 设置后同步 Notion
+python3 sync.py                    # 全流程
+python3 sync.py --offline          # 只用本地热度缓存，不发请求
+```
+
+### 轮换令牌（重要安全习惯）
+
+GitHub PAT 或 Notion API Key 暴露/过期后：
+
+1. **吊销旧的**：GitHub → Settings → Developer settings → Personal access tokens → Delete；Notion → 集成设置里删除/轮换
+2. **生成新的**：GitHub 选 classic + 勾 `repo`、`workflow`；Notion 重新建 integration
+3. **更新 Secrets**：仓库 Settings → Secrets and variables → Actions → 把新值填到 `GH_TOKEN` / `NOTION_API_KEY`（覆盖保存）
+
+> Secrets 只能改不能看，所以填完就看不到旧值了，无需担心历史泄露。
+
+### 发布改动（改脚本/规则/频率后）
+
+因为远端仓库会有一堆自动提交，本地落后时先拉取再推送：
+
+```sh
+git pull --rebase    # 拉取远端 + 把你的改动叠上去
+git push             # 推送后，下次自动运行即用新设置
+```
+
+> ⚠️ 在 `dsh-table-sync` 目录里执行这些 git 命令；注意别把 `#` 注释一起复制进终端。
+
+### 常见故障排查
+
+| 现象 | 原因 & 处理 |
+| --- | --- |
+| Actions 红叉，`Run sync` 报错 | 展开日志看具体步骤；最常见是令牌失效或网络问题 |
+| `[notion]` 同步失败 | 检查 `NOTION_API_KEY` 是否有效、集成是否已连接到数据库；脚本已保证不影响仓库表格 |
+| 表格没变化 | 正常——当天数据没变就跳过提交；看 `无变化，跳过提交` |
+| Pages 打不开 | 仓库 Settings → Pages → Source 是否选 `GitHub Actions`；是否最后一次部署成功 |
+| 想撤销某次自动提交 | 仓库 Commits → 找那次 `chore: weekly plugin table sync` → Revert；注意先 `git pull` |
+
