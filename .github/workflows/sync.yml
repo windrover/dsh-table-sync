@@ -1,0 +1,63 @@
+# 每周自动同步 DSH 插件表：
+#   GitHub 清单+热度 → 仓库内 Markdown/CSV 表格 + GitHub Pages 网页 + Notion 数据库
+# 触发：每周一 08:00 UTC（= 北京时间 16:00）或手动运行（workflow_dispatch）。
+name: dsh-table-sync
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'   # 每周一 08:00 UTC
+  workflow_dispatch:      # 支持在 Actions 页面手动触发
+
+permissions:
+  contents: write   # 提交更新后的表格
+  pages: write      # 部署 GitHub Pages
+  id-token: write
+
+concurrency:
+  group: dsh-table-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run sync
+        env:
+          # 高限速 PAT（推荐，5000 次/小时）。未设置时脚本走慢速兜底路径。
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          # Notion 集成令牌；未设置则跳过 Notion 同步（仓库表格仍会更新）。
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
+        run: python3 sync.py
+
+      - name: Commit updated tables
+        run: |
+          git config user.name 'dsh-table-sync[bot]'
+          git config user.email 'dsh-table-sync[bot]@users.noreply.github.com'
+          git add dsh-plugins-table.md dsh-plugins-table.csv docs/ data/heat.json
+          if git diff --cached --quiet; then
+            echo "无变化，跳过提交"
+          else
+            git commit -m "chore: weekly plugin table sync ($(date -u +%Y-%m-%d))"
+            git push
+          fi
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
