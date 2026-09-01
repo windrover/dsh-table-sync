@@ -82,12 +82,41 @@ def parse_readme(text):
                     "url": m2.group(2),
                     "desc": m2.group(3),
                 })
-    return counts, entries
+    # 源头去重：同一（归一化）URL 只保留首次出现的一条，
+    # 避免 README 中同插件被重复列举时污染表格与 Notion（按完整 URL，不按 repo，
+    # 以免误合并 monorepo 里的不同子插件）。
+    seen_url = set()
+    deduped = []
+    for e in entries:
+        k = norm_url(e["url"])
+        if k in seen_url:
+            continue
+        seen_url.add(k)
+        deduped.append(e)
+    if len(deduped) != len(entries):
+        print(f"[readme] 去重: {len(entries)} → {len(deduped)}", flush=True)
+    return counts, deduped
 
 
 def repo_of(url):
     m = re.search(r"https?://github\.com/([^/]+)/([^/)#?]+)", url)
     return f"{m.group(1)}/{m.group(2)}" if m else None
+
+
+def norm_url(url):
+    """归一化 URL 用于判重（去锚点/尾斜杠/.git/大小写差异）。
+
+    注意：仍按「完整 URL」判重，不按 repo —— 因为 monorepo 里同一 repo
+    下的不同子插件（URL 不同）是不同的插件，不能合并。
+    """
+    if not url:
+        return None
+    u = url.strip()
+    u = u.split("#")[0]
+    u = u.rstrip("/")
+    u = re.sub(r"\.git$", "", u, flags=re.I)
+    u = u.replace("www.", "")
+    return u.lower()
 
 
 # ---------------------------------------------------------------- 热度 ----
@@ -619,7 +648,7 @@ def sync_notion(entries, heat, db_id, key):
 
     def link_of(r):
         p = r["properties"].get("链接")
-        return p["url"] if p and p["type"] == "url" else None
+        return norm_url(p["url"]) if p and p["type"] == "url" else None
 
     def props_body(e, sub=None):
         r = repo_of(e["url"])
@@ -629,6 +658,9 @@ def sync_notion(entries, heat, db_id, key):
             "插件名称": {"title": [{"text": {"content": e["name"][:2000]}}]},
             "一级分类": {"select": {"name": e["cat"]}},
             "描述": {"rich_text": [{"text": {"content": e["desc"][:2000]}}]},
+            # 必须写入「链接」：去重依赖此字段。此前漏写 → 链接为空 →
+            # 判重失效 → 同一插件被反复新增（每天一条）。
+            "链接": {"url": e["url"]},
         }
         if sub:
             p["二级分类"] = {"select": {"name": sub}}
@@ -656,7 +688,8 @@ def sync_notion(entries, heat, db_id, key):
     if dupes:
         print(f"[notion] 归档重复行 {len(dupes)}", flush=True)
 
-    new_links = {e["url"] for e in entries}
+    new_links = {norm_url(e["url"]) for e in entries}
+    # seen / new_links 必须同构（都归一化），否则会误把正常记录判为"已下架"而归档
     to_archive = [l for l in seen if l not in new_links]
     # 差异比较：只更新真正变化的行（避免每周全量 PATCH）
     current = {}
@@ -692,9 +725,10 @@ def sync_notion(entries, heat, db_id, key):
     to_update = []
     to_create = []
     for e in entries:
-        if e["url"] not in seen:
+        k = norm_url(e["url"])          # 与 seen / current 的 key 保持一致
+        if k not in seen:
             to_create.append(e)
-        elif current[e["url"]] != expected(e, current[e["url"]]):
+        elif current[k] != expected(e, current[k]):
             to_update.append(e)
     print(f"[notion] 差异: 更新 {len(to_update)} / 新增 {len(to_create)} / 归档 {len(to_archive)}", flush=True)
 
@@ -715,8 +749,9 @@ def sync_notion(entries, heat, db_id, key):
     def do_update(e):
         rate_wait()
         # 已有人工二级分类的行不覆盖；空行自动打标
-        sub = None if current[e["url"]].get("sub") else tag_subcategory(e)
-        return notion_call("PATCH", f"/pages/{seen[e['url']]}", {"properties": props_body(e, sub)}, key)
+        k = norm_url(e["url"])          # 与 seen / current 的 key 保持一致
+        sub = None if current[k].get("sub") else tag_subcategory(e)
+        return notion_call("PATCH", f"/pages/{seen[k]}", {"properties": props_body(e, sub)}, key)
 
     def do_create(e):
         rate_wait()
