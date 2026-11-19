@@ -624,27 +624,65 @@ def notion_call(method, path, body=None, key=None):
     return {"object": "error", "code": "hard_fail"}
 
 
-def sync_notion(entries, heat, db_id, key):
-    """与 Notion 数据库比对：新增/更新/归档 + 去重。幂等，可重复执行。"""
-    import subprocess
+def notion_query_all(db_id, key):
+    """拉取数据库的全部行（必须绕过 Notion 单次查询 10000 行上限）。
 
-    print(f"[notion] 开始同步数据库 {db_id}", flush=True)
-
-    def query_all():
-        rows = []
+    坑（2026-11 踩到）：Notion 对「一次查询」有 10000 行硬上限，到顶时
+    has_more 会变成 False，响应里的 request_status.type == "incomplete"
+    （incomplete_reason: query_result_limit_reached）。只跟 next_cursor 的
+    朴素写法看起来"拉完了"，其实只拿到前 10000 行 —— 库更大之后：
+      · 超出的行永远看不到 → 去重归档碰不到它们；
+      · 这些插件又被当成"库里没有" → 每天重新新增一份 → 重复行越滚越多。
+    官方推荐做法是按 created_time 升序分窗：一窗到上限就带最后一行的
+    created_time（on_or_after，含边界）开下一窗，最后按 page id 去重。
+    """
+    rows = {}
+    window_start = None
+    while True:
+        limit_reached = False
+        window_count = 0
+        last_created = None
         cursor = None
         while True:
-            body = {"page_size": 100}
+            body = {"page_size": 100,
+                    "sorts": [{"timestamp": "created_time",
+                               "direction": "ascending"}]}
+            if window_start:
+                body["filter"] = {"timestamp": "created_time",
+                                  "created_time": {"on_or_after": window_start}}
             if cursor:
                 body["start_cursor"] = cursor
             d = notion_call("POST", f"/databases/{db_id}/query", body, key)
             if d.get("object") != "list":
                 raise RuntimeError(f"query failed: {d.get('code', d)}")
-            rows.extend(d.get("results", []))
-            if not d.get("has_more"):
-                break
+            batch = d.get("results", [])
+            window_count += len(batch)
+            for r in batch:
+                rows[r["id"]] = r
+                last_created = r.get("created_time") or last_created
+            if (d.get("request_status") or {}).get("type") == "incomplete":
+                limit_reached = True
             cursor = d.get("next_cursor")
-        return rows
+            if not cursor:
+                break
+        # 兜底：个别旧响应不带 request_status，但一窗正好 10000 行也按到顶处理
+        if not limit_reached and window_count < 10000:
+            break
+        if not last_created or last_created == window_start:
+            raise RuntimeError(
+                f"created_time 窗口无法前进（{last_created}），疑似单分钟超过 "
+                f"10000 行，需要再加过滤条件")
+        window_start = last_created
+        print(f"[notion] 已达单窗上限，从 created_time {window_start} 继续拉取",
+              flush=True)
+    return list(rows.values())
+
+
+def sync_notion(entries, heat, db_id, key):
+    """与 Notion 数据库比对：新增/更新/归档 + 去重。幂等，可重复执行。"""
+    import subprocess
+
+    print(f"[notion] 开始同步数据库 {db_id}", flush=True)
 
     def link_of(r):
         p = r["properties"].get("链接")
@@ -670,33 +708,40 @@ def sync_notion(entries, heat, db_id, key):
             p["🍴 Forks"] = {"number": f}
         return p
 
-    rows = query_all()
+    rows = notion_query_all(db_id, key)
     print(f"[notion] 现有行 {len(rows)}", flush=True)
-    # 去重：同一链接多行时归档多余行
+
+    def has_sub(r):
+        p = r["properties"].get("二级分类")
+        return bool(p and p.get("select"))
+
+    # 去重：同一链接多行时归档多余行。
+    # 保留优先级：已有人工「二级分类」的 > 创建更早的（rows 按 created_time 升序）。
     seen = {}
+    kept = {}
     dupes = []
     for r in rows:
         l = link_of(r)
         if l is None:
             continue
-        if l in seen:
-            dupes.append(r["id"])
-        else:
+        if l not in seen:
             seen[l] = r["id"]
-    for pid in dupes:
-        notion_call("PATCH", f"/pages/{pid}", {"archived": True}, key)
+            kept[l] = r
+        elif has_sub(r) and not has_sub(kept[l]):
+            dupes.append(kept[l]["id"])
+            seen[l] = r["id"]
+            kept[l] = r
+        else:
+            dupes.append(r["id"])
     if dupes:
-        print(f"[notion] 归档重复行 {len(dupes)}", flush=True)
+        print(f"[notion] 发现重复行 {len(dupes)}，稍后归档", flush=True)
 
     new_links = {norm_url(e["url"]) for e in entries}
     # seen / new_links 必须同构（都归一化），否则会误把正常记录判为"已下架"而归档
     to_archive = [l for l in seen if l not in new_links]
     # 差异比较：只更新真正变化的行（避免每周全量 PATCH）
     current = {}
-    for r in rows:
-        l = link_of(r)
-        if l is None:
-            continue
+    for l, r in kept.items():
         p = r["properties"]
         def textv(prop):
             obj = p.get(prop)
@@ -761,6 +806,10 @@ def sync_notion(entries, heat, db_id, key):
         rate_wait()
         return notion_call("PATCH", f"/pages/{seen[l]}", {"archived": True}, key)
 
+    def do_archive_page(pid):
+        rate_wait()
+        return notion_call("PATCH", f"/pages/{pid}", {"archived": True}, key)
+
     def run(tasks, fn, label):
         with ThreadPoolExecutor(max_workers=4) as pool:
             futs = [pool.submit(fn, t) for t in tasks]
@@ -772,6 +821,7 @@ def sync_notion(entries, heat, db_id, key):
             print(f"[notion] {label}: {ok}/{len(tasks)}", flush=True)
             return ok
 
+    run(dupes, do_archive_page, "归档重复")
     run(to_archive, do_archive, "归档")
     run(to_create, do_create, "新增")
     run(to_update, do_update, "更新")
