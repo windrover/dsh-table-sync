@@ -58,6 +58,29 @@ jobs:
         with:
           path: docs/
 
+      # 已知上游竞态（actions/deploy-pages#451，2026-11 下旬明显恶化）：
+      # 工件刚 finalize，紧接着查询清单可能返回 0 个，deploy 步骤随即失败。
+      # 同一 run 只有一个 github-pages 工件，所以在同一 job 内退避重试是安全的
+      # （重跑整个 job 反而会撞上 "Multiple artifacts named github-pages"）。
       - name: Deploy to GitHub Pages
         id: deployment
+        uses: actions/deploy-pages@v5
+        continue-on-error: true
+
+      - name: Wait before Pages deploy retry 1
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 45
+
+      - name: Deploy to GitHub Pages (retry 1)
+        id: deployment_retry1
+        if: steps.deployment.outcome == 'failure'
+        uses: actions/deploy-pages@v5
+        continue-on-error: true
+
+      - name: Wait before Pages deploy retry 2
+        if: ${{ steps.deployment.outcome == 'failure' && steps.deployment_retry1.outcome == 'failure' }}
+        run: sleep 120
+
+      - name: Deploy to GitHub Pages (retry 2)
+        if: ${{ steps.deployment.outcome == 'failure' && steps.deployment_retry1.outcome == 'failure' }}
         uses: actions/deploy-pages@v5
